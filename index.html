@@ -37,7 +37,6 @@
       text-align: center;
     }
 
-    /* [접근성] label은 시각적으로 숨기되 스크린리더에는 노출 */
     .visually-hidden {
       position: absolute;
       width: 1px;
@@ -82,6 +81,11 @@
 
     .input-row button:hover {
       background: #3a78e0;
+    }
+
+    .input-row button:disabled {
+      background: #a0aec0;
+      cursor: not-allowed;
     }
 
     .stats {
@@ -185,7 +189,14 @@
       font-size: 0.95rem;
     }
 
-    .storage-error {
+    .loading {
+      text-align: center;
+      color: #a0aec0;
+      padding: 40px 0;
+      font-size: 0.95rem;
+    }
+
+    .db-error {
       font-size: 0.8rem;
       color: #e53e3e;
       text-align: center;
@@ -198,9 +209,7 @@
   <div class="container">
     <h1>🛒 쇼핑 리스트</h1>
 
-    <!-- [접근성] <form> 으로 감싸 시맨틱 구조 확보, submit 이벤트 활용 -->
     <form id="addForm" novalidate>
-      <!-- [접근성] visually-hidden label로 스크린리더 지원 -->
       <label for="itemInput" class="visually-hidden">아이템 이름</label>
       <div class="input-row">
         <input
@@ -210,44 +219,49 @@
           maxlength="100"
           autocomplete="off"
         >
-        <!-- [접근성] type="submit" 으로 명시 -->
-        <button type="submit">추가</button>
+        <button type="submit" id="addBtn">추가</button>
       </div>
     </form>
 
     <div class="stats">
       <span id="statsText">총 0개</span>
-      <!-- [접근성] type="button" 명시로 form submit 방지 -->
       <button type="button" class="clear-done" id="clearDoneBtn">완료 항목 삭제</button>
     </div>
 
     <ul id="list" aria-label="쇼핑 목록"></ul>
-    <div class="empty" id="empty">아직 아이템이 없어요.</div>
-    <p class="storage-error" id="storageError">저장 공간이 부족합니다.</p>
+    <div class="loading" id="loading">불러오는 중...</div>
+    <div class="empty" id="empty" style="display:none">아직 아이템이 없어요.</div>
+    <p class="db-error" id="dbError"></p>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script>
-    /* [에러 처리] localStorage 접근을 try/catch 로 래핑 (QuotaExceededError 대응) */
-    function loadFromStorage() {
-      try {
-        return JSON.parse(localStorage.getItem('shoppingList') || '[]');
-      } catch {
-        return [];
-      }
+    const SUPABASE_URL = 'https://vsnuwikgxrovegtrthrv.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzbnV3aWtneHJvdmVndHJ0aHJ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5NjQ0NDIsImV4cCI6MjA5NjU0MDQ0Mn0.SWb7a7wSWqJu_1rau8SqgYdVq1pRtcc46AmWLTVXnGw';
+
+    const { createClient } = window.supabase;
+    const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    let items = [];
+
+    function showError(msg) {
+      const el = document.getElementById('dbError');
+      el.textContent = msg;
+      el.style.display = 'block';
     }
 
-    function saveToStorage(data) {
-      try {
-        localStorage.setItem('shoppingList', JSON.stringify(data));
-        document.getElementById('storageError').style.display = 'none';
-      } catch (e) {
-        if (e.name === 'QuotaExceededError') {
-          document.getElementById('storageError').style.display = 'block';
-        }
-      }
+    function clearError() {
+      document.getElementById('dbError').style.display = 'none';
     }
 
-    let items = loadFromStorage();
+    function setLoading(on) {
+      document.getElementById('loading').style.display = on ? 'block' : 'none';
+    }
+
+    function setAddDisabled(on) {
+      document.getElementById('addBtn').disabled = on;
+      document.getElementById('itemInput').disabled = on;
+    }
 
     function render() {
       const list = document.getElementById('list');
@@ -258,7 +272,6 @@
       stats.textContent = `총 ${items.length}개 · 완료 ${done}개`;
       empty.style.display = items.length === 0 ? 'block' : 'none';
 
-      /* [보안] innerHTML 대신 createElement + textContent 사용 (XSS 방지) */
       list.innerHTML = '';
       items.forEach((item, idx) => {
         const li = document.createElement('li');
@@ -283,9 +296,8 @@
 
         const span = document.createElement('span');
         span.className = 'item-text';
-        span.textContent = item.text; /* [보안] textContent로 안전하게 삽입 */
+        span.textContent = item.text;
 
-        /* [접근성] 아이콘 전용 버튼에 aria-label 추가 */
         const deleteBtn = document.createElement('button');
         deleteBtn.type = 'button';
         deleteBtn.className = 'delete-btn';
@@ -309,7 +321,6 @@
         li.appendChild(span);
         li.appendChild(deleteBtn);
 
-        /* [이벤트] addEventListener 사용 (인라인 onclick 제거) */
         checkbox.addEventListener('click', (e) => { e.stopPropagation(); toggleItem(idx); });
         span.addEventListener('click', () => toggleItem(idx));
         deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteItem(idx); });
@@ -318,42 +329,89 @@
       });
     }
 
-    function addItem() {
+    async function loadItems() {
+      setLoading(true);
+      const { data, error } = await db
+        .from('shopping_items')
+        .select('*')
+        .order('created_at', { ascending: true });
+
+      setLoading(false);
+      if (error) { showError('데이터를 불러오지 못했습니다: ' + error.message); return; }
+      items = data;
+      render();
+    }
+
+    async function addItem() {
       const input = document.getElementById('itemInput');
       const text = input.value.trim();
       if (!text) return;
-      items.push({ text, checked: false });
+
+      setAddDisabled(true);
+      clearError();
+      const { data, error } = await db
+        .from('shopping_items')
+        .insert({ text, checked: false })
+        .select()
+        .single();
+
+      setAddDisabled(false);
+      if (error) { showError('추가 실패: ' + error.message); return; }
+      items.push(data);
       input.value = '';
-      saveToStorage(items);
       render();
       input.focus();
     }
 
-    function toggleItem(idx) {
-      items[idx].checked = !items[idx].checked;
-      saveToStorage(items);
+    async function toggleItem(idx) {
+      const item = items[idx];
+      clearError();
+      const { error } = await db
+        .from('shopping_items')
+        .update({ checked: !item.checked })
+        .eq('id', item.id);
+
+      if (error) { showError('업데이트 실패: ' + error.message); return; }
+      items[idx].checked = !item.checked;
       render();
     }
 
-    function deleteItem(idx) {
+    async function deleteItem(idx) {
+      const item = items[idx];
+      clearError();
+      const { error } = await db
+        .from('shopping_items')
+        .delete()
+        .eq('id', item.id);
+
+      if (error) { showError('삭제 실패: ' + error.message); return; }
       items.splice(idx, 1);
-      saveToStorage(items);
       render();
     }
 
-    /* [이벤트] addEventListener 로 폼 submit 처리 */
+    async function clearDone() {
+      const doneIds = items.filter(i => i.checked).map(i => i.id);
+      if (doneIds.length === 0) return;
+
+      clearError();
+      const { error } = await db
+        .from('shopping_items')
+        .delete()
+        .in('id', doneIds);
+
+      if (error) { showError('삭제 실패: ' + error.message); return; }
+      items = items.filter(i => !i.checked);
+      render();
+    }
+
     document.getElementById('addForm').addEventListener('submit', (e) => {
       e.preventDefault();
       addItem();
     });
 
-    document.getElementById('clearDoneBtn').addEventListener('click', () => {
-      items = items.filter(i => !i.checked);
-      saveToStorage(items);
-      render();
-    });
+    document.getElementById('clearDoneBtn').addEventListener('click', clearDone);
 
-    render();
+    loadItems();
   </script>
 </body>
 </html>
